@@ -467,16 +467,40 @@ class RecommendationSimulationResult(BaseModel):
     scenario_recommendation_ids: Optional[List[str]] = Field(None, description="List of recommendation IDs simulated")
 
 
+class AdvisorExplanation(BaseModel):
+    status: str = Field(..., description="AI advisor explanation status: ok, partial, or fallback")
+    executive_summary: Optional[Dict[str, Any]] = Field(
+        None,
+        description="Project-level executive summary produced by the AI advisor",
+    )
+    recommendation_explanations: List[Dict[str, Any]] = Field(
+        default_factory=list,
+        description="Structured recommendation explanations produced by the AI advisor",
+    )
+    scenario_explanation: Optional[Dict[str, Any]] = Field(
+        None,
+        description="Structured scenario explanation produced by the AI advisor",
+    )
+
+
 class RecommendationResponse(BaseModel):
     session_id: str = Field(..., description="Session ID")
     project_name: str = Field(..., description="Project name")
     recommendations: List[RecommendationSummary] = Field(default_factory=list, description="Ranked recommendation list")
+    advisor_explanation: Optional[AdvisorExplanation] = Field(
+        None,
+        description="AI advisor narrative payload for the request",
+    )
 
 
 class RecommendationSimulationResponse(BaseModel):
     session_id: str = Field(..., description="Session ID")
     project_name: str = Field(..., description="Project name")
     simulation_result: RecommendationSimulationResult = Field(..., description="Simulation result")
+    advisor_explanation: Optional[AdvisorExplanation] = Field(
+        None,
+        description="AI advisor narrative payload for the simulation result",
+    )
 
 
 class ScopeChangeResponse(BaseModel):

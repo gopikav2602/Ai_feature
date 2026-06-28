@@ -7,6 +7,7 @@ FastAPI application setup and route registration.
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from datetime import datetime
+import logging
 
 from app.core.config import settings
 from app.api.models import ApiResponse
@@ -19,6 +20,11 @@ from app.api.routes import monte_carlo
 from app.api.routes import recommendations
 from app.api.routes import risk
 from app.api.routes import scope_change
+from app.ai.config import ai_settings
+from app.ai.client import build_client
+from app.ai.cache import InMemoryNarrativeCache
+from app.ai.exceptions import AIClientError
+from app.engines.narrative_service import NarrativeService
 
 
 def create_app() -> FastAPI:
@@ -57,6 +63,20 @@ def create_app() -> FastAPI:
             },
         )
     
+    # Register singleton AI advisor service
+    ai_client = None
+    if ai_settings.ai_advisor_enabled:
+        try:
+            ai_client = build_client(ai_settings)
+        except AIClientError as exc:
+            logging.warning("AI client initialization failed; AI advisor will run in fallback mode: %s", exc)
+            ai_client = None
+    app.state.narrative_service = NarrativeService(
+        client=ai_client,
+        settings=ai_settings,
+        cache=InMemoryNarrativeCache(),
+    )
+
     # Register routers
     app.include_router(upload_router, prefix="/api", tags=["Upload"])
     app.include_router(phase2.router)

@@ -5,7 +5,7 @@ Endpoints:
 - POST /api/recommendations/simulate
 - POST /api/recommendations/scenario
 """
-from fastapi import APIRouter, HTTPException, Query
+from fastapi import APIRouter, HTTPException, Query, Request
 from typing import Optional, Dict, List
 from app.storage import store
 from app.api.models import ApiResponse, ErrorCodes
@@ -19,6 +19,7 @@ from app.api.models_phase3 import (
     RecommendationType,
 )
 from app.domain.models import ProjectState
+from app.engines.advisor_input_builder import AdvisorInputBuilder
 from app.engines.recommendation_engine.models import RecommendationAction, ScoringWeights
 from app.engines.recommendation_engine.recommendation_engine_v2 import RecommendationEngineV2
 
@@ -211,13 +212,35 @@ def _build_engine(session_id: str) -> RecommendationEngineV2:
                 success=False,
                 error_code=ErrorCodes.SESSION_NOT_FOUND,
                 message=f"Session {session_id} not found",
-            ).model_dump(),
+            ).model_dump(mode='json'),
         )
     return RecommendationEngineV2(project_state=project_state, simulation_count=1000, scoring_weights=ScoringWeights())
 
 
+_advisor_builder = AdvisorInputBuilder()
+
+
+def _get_narrative_service(request: Request):
+    narrative_service = getattr(request.app.state, "narrative_service", None)
+    if narrative_service is None:
+        raise HTTPException(
+            status_code=500,
+            detail=ApiResponse(
+                success=False,
+                error_code=ErrorCodes.INTERNAL_ERROR,
+                message="AI advisor service is unavailable",
+            ).model_dump(mode='json'),
+        )
+    return narrative_service
+
+
+def _fallback_text_by_recommendation(recommendations):
+    return {rec.recommendation_id: rec.description for rec in recommendations}
+
+
 @router.get("/recommendations")
 async def get_recommendations(
+    request: Request,
     session_id: str = Query(..., description="Session ID"),
     top_n: int = Query(5, description="Number of recommendations to return"),
 ):
@@ -225,15 +248,27 @@ async def get_recommendations(
         session_id = session_id.strip()
         recommendation_engine = _build_engine(session_id)
         candidates = recommendation_engine.generate(top_n=top_n)
-        
-        # CRITICAL FIX: Compute upstream baseline metrics once (cached by engine)
+
         upstream = recommendation_engine._compute_upstream()
         baseline_metrics = {
             "on_time_probability": round(upstream.monte_carlo.on_time_probability, 4),
             "expected_delay_days": round(upstream.forecast.expected_delay_days, 2),
             "overall_risk_score": round(upstream.risk_result.overall_risk_score, 2),
         }
-        
+
+        advisor_input = _advisor_builder.build_recommendation_input(
+            project_id=session_id,
+            project_state=recommendation_engine.project_state,
+            forecast=upstream.forecast,
+            monte_carlo=upstream.monte_carlo,
+            recommendations=candidates,
+            metrics=upstream.metrics,
+        )
+        advisor_explanation = await _get_narrative_service(request).explain(
+            advisor_input,
+            _fallback_text_by_recommendation(candidates),
+        )
+
         response = RecommendationResponse(
             session_id=session_id,
             project_name=recommendation_engine.project_state.project_info.project_name,
@@ -245,6 +280,7 @@ async def get_recommendations(
                 )
                 for rec in candidates
             ],
+            advisor_explanation=advisor_explanation,
         )
         return ApiResponse(success=True, data=response.model_dump(), message="Recommendations generated")
     except HTTPException:
@@ -256,18 +292,42 @@ async def get_recommendations(
                 success=False,
                 error_code=ErrorCodes.INTERNAL_ERROR,
                 message=f"Error generating recommendations: {str(e)}",
-            ).model_dump(),
+            ).model_dump(mode='json'),
         )
 
 
 @router.post("/recommendations/simulate")
 async def simulate_recommendation(
+    request: Request,
     session_id: str = Query(..., description="Session ID"),
-    request: RecommendationSimulationRequest = ..., 
+    request_body: RecommendationSimulationRequest = ..., 
 ):
     try:
         recommendation_engine = _build_engine(session_id)
-        simulation_result = recommendation_engine.simulate(request.recommendation_id)
+        simulation_result = recommendation_engine.simulate(request_body.recommendation_id)
+        upstream = recommendation_engine._compute_upstream()
+        recommendation = next(
+            (rec for rec in recommendation_engine._cached_recommendations if rec.recommendation_id == request_body.recommendation_id),
+            None,
+        )
+        if recommendation is None:
+            raise KeyError(f"Recommendation {request_body.recommendation_id} not found")
+
+        advisor_input = _advisor_builder.build_simulation_input(
+            project_id=session_id,
+            recommendation=recommendation,
+            simulation_result=simulation_result,
+            risk=upstream.risk_result,
+            project_state=recommendation_engine.project_state,
+            forecast=upstream.forecast,
+            monte_carlo=upstream.monte_carlo,
+            metrics=upstream.metrics,
+        )
+        advisor_explanation = await _get_narrative_service(request).explain(
+            advisor_input,
+            _fallback_text_by_recommendation([recommendation]),
+        )
+
         response = RecommendationSimulationResponse(
             session_id=session_id,
             project_name=recommendation_engine.project_state.project_info.project_name,
@@ -295,6 +355,7 @@ async def simulate_recommendation(
                 summary=simulation_result.summary,
                 scenario_recommendation_ids=simulation_result.recommendation_ids,
             ),
+            advisor_explanation=advisor_explanation,
         )
         return ApiResponse(success=True, data=response.model_dump(), message="Simulation completed")
     except HTTPException:
@@ -306,18 +367,40 @@ async def simulate_recommendation(
                 success=False,
                 error_code=ErrorCodes.INTERNAL_ERROR,
                 message=f"Error simulating recommendation: {str(e)}",
-            ).model_dump(),
+            ).model_dump(mode='json'),
         )
 
 
 @router.post("/recommendations/scenario")
 async def simulate_scenario(
+    request: Request,
     session_id: str = Query(..., description="Session ID"),
-    request: RecommendationScenarioRequest = ..., 
+    request_body: RecommendationScenarioRequest = ..., 
 ):
     try:
         recommendation_engine = _build_engine(session_id)
-        scenario = recommendation_engine.simulate_scenario(request.recommendation_ids)
+        scenario = recommendation_engine.simulate_scenario(request_body.recommendation_ids)
+        recommendations = [
+            rec
+            for rec in recommendation_engine._cached_recommendations
+            if rec.recommendation_id in set(request_body.recommendation_ids)
+        ]
+
+        advisor_input = _advisor_builder.build_scenario_input(
+            project_id=session_id,
+            project_state=recommendation_engine.project_state,
+            forecast=recommendation_engine._compute_upstream().forecast,
+            monte_carlo=recommendation_engine._compute_upstream().monte_carlo,
+            recommendations=recommendations,
+            simulation_result=scenario,
+            risk=recommendation_engine._compute_upstream().risk_result,
+            metrics=recommendation_engine._compute_upstream().metrics,
+        )
+        advisor_explanation = await _get_narrative_service(request).explain(
+            advisor_input,
+            _fallback_text_by_recommendation(recommendations),
+        )
+
         response = RecommendationSimulationResponse(
             session_id=session_id,
             project_name=recommendation_engine.project_state.project_info.project_name,
@@ -343,8 +426,9 @@ async def simulate_scenario(
                 seed_used=scenario.seed_used,
                 is_positive_impact=scenario.is_positive_impact,
                 summary=scenario.summary,
-                scenario_recommendation_ids=request.recommendation_ids,
+                scenario_recommendation_ids=request_body.recommendation_ids,
             ),
+            advisor_explanation=advisor_explanation,
         )
         return ApiResponse(success=True, data=response.model_dump(), message="Scenario simulation completed")
     except HTTPException:
@@ -356,5 +440,5 @@ async def simulate_scenario(
                 success=False,
                 error_code=ErrorCodes.INTERNAL_ERROR,
                 message=f"Error simulating recommendation scenario: {str(e)}",
-            ).model_dump(),
+            ).model_dump(mode='json'),
         )

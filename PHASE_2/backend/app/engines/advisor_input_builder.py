@@ -185,9 +185,16 @@ def build_scenario_facts(
     snapshot with finish dates when a forecast result is available, while keeping
     other fields absent rather than inventing them.
     """
-    scenario_ids = simulation_result.scenario_recommendation_ids or (
-        [simulation_result.recommendation_id] if simulation_result.recommendation_id else []
-    )
+    # Handle both SimulationResult (recommendation_ids) and RecommendationSimulationResult (scenario_recommendation_ids)
+    # This supports both SimulationEngineV2 output and API model output
+    scenario_ids = []
+    if hasattr(simulation_result, 'scenario_recommendation_ids'):
+        scenario_ids = simulation_result.scenario_recommendation_ids or []
+    elif hasattr(simulation_result, 'recommendation_ids'):
+        scenario_ids = simulation_result.recommendation_ids or []
+    
+    if not scenario_ids and hasattr(simulation_result, 'recommendation_id') and simulation_result.recommendation_id:
+        scenario_ids = [simulation_result.recommendation_id]
 
     baseline_finish_date = ""
     simulated_finish_date = ""
@@ -201,30 +208,67 @@ def build_scenario_facts(
     if monte_carlo is None:
         warnings.append("Monte Carlo result unavailable for risk comparison")
 
+    # Extract fields from simulation_result, handling both SimulationResult and RecommendationSimulationResult
+    scenario_id = getattr(simulation_result, 'session_id', '')
+    
+    # Handle delay reduction: SimulationResult uses delta_expected_delay_days, RecommendationSimulationResult uses delay_reduction_days
+    days_saved = getattr(simulation_result, 'delay_reduction_days', None)
+    if days_saved is None:
+        days_saved = getattr(simulation_result, 'delta_expected_delay_days', 0.0)
+    
+    # Handle probability fields
+    # RecommendationSimulationResult has baseline_probability, after_probability, probability_gain
+    # SimulationResult has baseline_metrics.on_time_probability, simulated_metrics.on_time_probability, delta_on_time_probability
+    baseline_prob = getattr(simulation_result, 'baseline_probability', None)
+    if baseline_prob is None and hasattr(simulation_result, 'baseline_metrics'):
+        baseline_prob = simulation_result.baseline_metrics.on_time_probability
+    
+    simulated_prob = getattr(simulation_result, 'after_probability', None)
+    if simulated_prob is None and hasattr(simulation_result, 'simulated_metrics'):
+        simulated_prob = simulation_result.simulated_metrics.on_time_probability
+    
+    prob_gain = getattr(simulation_result, 'probability_gain', None)
+    if prob_gain is None and hasattr(simulation_result, 'delta_on_time_probability'):
+        prob_gain = simulation_result.delta_on_time_probability
+    
+    # Handle risk fields
+    baseline_risk = getattr(simulation_result, 'baseline_risk_score', None)
+    if baseline_risk is None and hasattr(simulation_result, 'baseline_metrics'):
+        baseline_risk = simulation_result.baseline_metrics.overall_risk_score
+    
+    simulated_risk = getattr(simulation_result, 'after_risk_score', None)
+    if simulated_risk is None and hasattr(simulation_result, 'simulated_metrics'):
+        simulated_risk = simulation_result.simulated_metrics.overall_risk_score
+    
+    risk_reduction = getattr(simulation_result, 'risk_reduction', None)
+    if risk_reduction is None and hasattr(simulation_result, 'delta_risk_score'):
+        risk_reduction = simulation_result.delta_risk_score
+    
+    # Handle velocity delta
+    velocity_delta = getattr(simulation_result, 'delta_projected_velocity', None)
+
     return ScenarioFacts(
-        scenario_id=simulation_result.session_id,
+        scenario_id=scenario_id,
         selected_recommendation_ids=scenario_ids,
         baseline_finish_date=baseline_finish_date,
         simulated_finish_date=simulated_finish_date,
-        days_saved=simulation_result.delay_reduction_days,
-        baseline_on_time_probability=simulation_result.baseline_probability,
-        simulated_on_time_probability=simulation_result.after_probability,
-        confidence_delta=simulation_result.probability_gain,
-        baseline_risk_score=simulation_result.baseline_risk_score,
-        simulated_risk_score=simulation_result.after_risk_score,
-        risk_reduction=simulation_result.risk_reduction,
+        days_saved=days_saved,
+        baseline_on_time_probability=baseline_prob,
+        simulated_on_time_probability=simulated_prob,
+        confidence_delta=prob_gain,
+        baseline_risk_score=baseline_risk,
+        simulated_risk_score=simulated_risk,
+        risk_reduction=risk_reduction,
         # Pass through as-is: delta_projected_velocity is genuinely
-        # Optional on RecommendationSimulationResult. Using `or 0.0` here
-        # would collapse "not computed" (None) and "computed as exactly
-        # 0.0" into the same value -- exactly the zero-vs-unavailable
-        # conflation this field's Optional type exists to prevent.
-        velocity_delta=simulation_result.delta_projected_velocity,
-        # Not produced by RecommendationSimulationResult at all -- left
+        # Optional. Using `or 0.0` would collapse "not computed" (None) 
+        # and "computed as exactly 0.0" into the same value.
+        velocity_delta=velocity_delta,
+        # Not produced by either result type at this level -- left
         # as None (unavailable), never defaulted to 0.0.
         utilization_delta=None,
         carryover_delta=None,
         blocker_delta=None,
-        overall_improvement_score=simulation_result.probability_gain * 100.0,
+        overall_improvement_score=prob_gain * 100.0 if prob_gain is not None else 0.0,
         simulation_success=simulation_result.is_positive_impact,
         warnings=warnings,
     )
@@ -299,6 +343,34 @@ class AdvisorInputBuilder:
             metrics=metrics,
             risk=risk,
             recommendations=[recommendation],
+            simulation_result=simulation_result,
+        )
+
+    def build_scenario_input(
+        self,
+        project_id: str,
+        project_state: ProjectState,
+        forecast: ForecastResult,
+        monte_carlo: MonteCarloResult,
+        recommendations: List[Recommendation],
+        simulation_result: RecommendationSimulationResult,
+        risk: Optional[RiskResult] = None,
+        metrics: Optional[ProjectMetrics] = None,
+    ) -> AdvisorInput:
+        """
+        Build an AdvisorInput for multi-recommendation scenario explanations.
+
+        This is used by /recommendations/scenario to provide the AI advisor
+        with the selected recommendations and the resulting simulation state.
+        """
+        return self._build(
+            project_id=project_id,
+            project_state=project_state,
+            forecast=forecast,
+            monte_carlo=monte_carlo,
+            metrics=metrics,
+            risk=risk,
+            recommendations=recommendations,
             simulation_result=simulation_result,
         )
 
