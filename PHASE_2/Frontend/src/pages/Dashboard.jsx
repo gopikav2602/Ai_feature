@@ -659,6 +659,7 @@ function ActionsPage({session}){
   const [simulatingId, setSimulatingId] = useState(null)
   const [simulationResult, setSimulationResult] = useState(null)
   const [selected, setSelected] = useState([])
+  const [scenarioLoading, setScenarioLoading] = useState(false)
 
   const sessionId = session?.project_summary?.session_id || ''
 
@@ -690,11 +691,12 @@ function ActionsPage({session}){
 
   const runScenario = async () => {
     if(selected.length === 0) return
-    setLoading(true)
+    setScenarioLoading(true)
+    setError(null)
     try{
       const resp = await api.simulateScenario({ recommendation_ids: selected.slice(0,3) }, sessionId)
       setSimulationResult(resp.simulation_result || resp)
-    }catch(err){ setError(err) }finally{ setLoading(false) }
+    }catch(err){ setError(err) }finally{ setScenarioLoading(false) }
   }
 
   const toggleSelect = (id) => {
@@ -732,7 +734,7 @@ function ActionsPage({session}){
             <p className="mt-2 text-sm text-slate-400">Select recommendations to simulate their effect on delivery.</p>
           </div>
           <div className="flex items-center gap-3">
-            <button onClick={runScenario} disabled={selected.length===0} className="rounded-2xl border border-emerald-500 bg-emerald-500/10 px-4 py-2 text-sm font-semibold text-emerald-200">Simulate selection ({selected.length})</button>
+            <button onClick={runScenario} disabled={selected.length===0 || scenarioLoading} className="rounded-2xl border border-emerald-500 bg-emerald-500/10 px-4 py-2 text-sm font-semibold text-emerald-200 disabled:opacity-50">{scenarioLoading ? 'Simulating selection…' : `Simulate selection (${selected.length})`}</button>
           </div>
         </div>
 
@@ -785,10 +787,36 @@ function ActionsPage({session}){
         </div>
       </section>
 
-      {simulationResult && simulationResult.scenario_recommendation_ids && simulationResult.scenario_recommendation_ids.length > 0 && (
-        <section className="rounded-3xl border border-slate-700 bg-slate-900 p-6">
+      {simulationResult && simulationResult.recommendation_id == null && simulationResult.scenario_recommendation_ids && simulationResult.scenario_recommendation_ids.length > 0 && (
+        <section className="rounded-3xl border border-emerald-500 bg-emerald-500/5 p-6">
           <p className="text-sm uppercase tracking-[0.3em] text-amber-400">Scenario result</p>
-          <div className="mt-3 text-sm text-slate-300">Applied: {simulationResult.scenario_recommendation_ids.join(', ')}</div>
+          <div className="mt-1 text-sm text-slate-300">Applied: {simulationResult.scenario_recommendation_ids.join(', ')}</div>
+          <div className="mt-4 grid grid-cols-1 gap-3 sm:grid-cols-3">
+            <div className="rounded-2xl bg-slate-900 p-3 text-center">
+              <div className="text-xs text-slate-400">On-time probability</div>
+              <div className="text-lg font-semibold text-white">
+                {Math.round((simulationResult.after_probability||0)*100)}%{' '}
+                <span className="text-slate-400">(was {Math.round((simulationResult.baseline_probability||0)*100)}%)</span>
+              </div>
+            </div>
+            <div className="rounded-2xl bg-slate-900 p-3 text-center">
+              <div className="text-xs text-slate-400">Expected delay</div>
+              <div className="text-lg font-semibold text-white">
+                {(simulationResult.after_delay_days||0).toFixed(1)}d{' '}
+                <span className="text-slate-400">(was {(simulationResult.baseline_delay_days||0).toFixed(1)}d)</span>
+              </div>
+            </div>
+            <div className="rounded-2xl bg-slate-900 p-3 text-center">
+              <div className="text-xs text-slate-400">Risk score</div>
+              <div className="text-lg font-semibold text-white">
+                {Math.round(simulationResult.after_risk_score||0)}{' '}
+                <span className="text-slate-400">(was {Math.round(simulationResult.baseline_risk_score||0)})</span>
+              </div>
+            </div>
+          </div>
+          {simulationResult.summary && (
+            <p className="mt-4 text-sm text-slate-300">{simulationResult.summary}</p>
+          )}
         </section>
       )}
     </div>
